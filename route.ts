@@ -1,25 +1,33 @@
-import { NextResponse } from "next/server";
-
+import { NextRequest, NextResponse } from "next/server";
+import { google } from "googleapis";
+import { getGoogleClient } from "@/lib/google";
 export const runtime = "nodejs";
 
-export async function POST() {
-  if (!process.env.OPENAI_API_KEY) return NextResponse.json({ error: "OPENAI_API_KEY ist nicht konfiguriert." }, { status: 500 });
+export async function GET() {
   try {
-    const response = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        session: {
-          type: "realtime",
-          model: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime",
-          audio: { output: { voice: process.env.OPENAI_REALTIME_VOICE || "ash" } }
-        }
-      })
-    });
-    const data = await response.json();
-    if (!response.ok) return NextResponse.json({ error: data.error?.message || "Realtime-Token konnte nicht erstellt werden." }, { status: response.status });
-    return NextResponse.json({ value: data.value || data.client_secret?.value });
-  } catch {
-    return NextResponse.json({ error: "Realtime-Dienst nicht erreichbar." }, { status: 502 });
+    const auth = await getGoogleClient();
+    if (!auth) return NextResponse.json({ error: "Google ist noch nicht verbunden." }, { status: 401 });
+    const calendar = google.calendar({ version: "v3", auth });
+    const result = await calendar.events.list({ calendarId: "primary", timeMin: new Date().toISOString(), maxResults: 10, singleEvents: true, orderBy: "startTime" });
+    return NextResponse.json({ events: (result.data.items || []).map(e => ({ id: e.id, summary: e.summary || "(Ohne Titel)", start: e.start?.dateTime || e.start?.date, end: e.end?.dateTime || e.end?.date, location: e.location || "" })) });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Kalender konnte nicht geladen werden" }, { status: 500 });
+  }
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const { summary, start, end, description, confirm } = await request.json();
+    if (confirm !== true) return NextResponse.json({ error: "Terminerstellung benötigt eine ausdrückliche Bestätigung." }, { status: 400 });
+    if (typeof summary !== "string" || !summary.trim() || typeof start !== "string" || typeof end !== "string" || new Date(start) >= new Date(end)) {
+      return NextResponse.json({ error: "Bitte Titel sowie gültige Start- und Endzeit angeben." }, { status: 400 });
+    }
+    const auth = await getGoogleClient();
+    if (!auth) return NextResponse.json({ error: "Google ist noch nicht verbunden." }, { status: 401 });
+    const calendar = google.calendar({ version: "v3", auth });
+    const event = await calendar.events.insert({ calendarId: "primary", requestBody: { summary, start: { dateTime: start }, end: { dateTime: end }, description: typeof description === "string" ? description : "" } });
+    return NextResponse.json({ created: true, id: event.data.id, htmlLink: event.data.htmlLink });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Termin konnte nicht erstellt werden" }, { status: 500 });
   }
 }
